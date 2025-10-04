@@ -1,0 +1,6 @@
+# .gitignore
+# Ignore OS and IDE artifacts
+__pycache__/
+*.pyc
+.env
+*.log
