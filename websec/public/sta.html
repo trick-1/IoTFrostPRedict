@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Sense–Think–Act: Frost Control</title>
+<style>
+:root{color-scheme:light dark}
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,'Helvetica Neue',Arial,sans-serif;margin:2rem;line-height:1.45}
+h1{margin:0 0 .25rem}
+.muted{color:#666;margin:0 0 1rem}
+.controls{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin:.75rem 0 1rem}
+button,select{padding:.45rem .65rem;border:1px solid #d1d5db;border-radius:.4rem;background:#fff;cursor:pointer}
+.badge{display:inline-block;padding:.15rem .45rem;border-radius:999px;font-size:.8rem;font-weight:600}
+.ok{background:#e6f7ef;color:#065f46;border:1px solid #a7f3d0}
+.warn{background:#fee2e2;color:#991b1b;border:1px solid #fecaca}
+.info{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe}
+table{border-collapse:collapse;width:100%;margin-top:.5rem}
+th,td{border:1px solid #e5e7eb;padding:.5rem;text-align:left} th{background:#f9fafb}
+#err{margin:.25rem 0 0;color:#b91c1c}
+#meta{margin:.25rem 0 0}
+small.muted{display:block;margin-top:.35rem}
+@media (prefers-color-scheme: dark){
+  .muted{color:#9ca3af}
+  th,td{border-color:#374151} th{background:#111827}
+  button,select{border-color:#4b5563;background:#1f2937;color:#e5e7eb}
+}
+</style>
+</head>
+<body>
+  <h1>Sense–Think–Act</h1>
+  <p class="muted">Aggregates frost predictions per sensor and decides an action (every ~15 minutes).</p>
+
+  <div class="controls">
+    <a href="./"><button type="button">← Back to Index</button></a>
+    <button id="refresh" type="button" title="Fetch a fresh snapshot now">Refresh now</button>
+    <span id="conn" class="badge info">Connecting…</span>
+  </div>
+
+  <div id="meta" class="muted">
+    Last update: <b id="lastRun">—</b> ·
+    Forward: <b id="forward">—</b> ·
+    Horizon: <b id="horizon">—</b> ·
+    Threshold: <b id="thresh">—</b> ·
+    Items: <b id="count">0</b>
+    <small class="muted">Source: <code id="base"></code></small>
+  </div>
+  <div id="err"></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Sensor</th>
+        <th>Prediction time (UTC)</th>
+        <th>Probability</th>
+        <th>Status</th>
+        <th>Decision</th>
+        <th>Reason</th>
+      </tr>
+    </thead>
+    <tbody id="tbody">
+      <tr><td colspan="6">Loading…</td></tr>
+    </tbody>
+  </table>
+
+<script>
+(function(){
+  const $ = (id)=>document.getElementById(id);
+  const esc = (s)=> String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const pct = (x)=> (x==null || !isFinite(x)) ? '' : (Number(x)*100).toFixed(1) + '%';
+
+  function getParam(k){ const u=new URL(window.location.href); return u.searchParams.get(k); }
+
+  // BASE of STA service:
+  // Default to '/sta' so you can reverse-proxy it from your HTTPS webserver.
+  // Override with ?staBase=http://host:3010 to call it directly (requires CORS on STA).
+  const STA_BASE = (getParam('staBase') || '/sta').replace(/\/+$/,'');
+  $('base').textContent = STA_BASE;
+
+  const state = {
+    connected: false,
+    snapshot: null,
+  };
+
+  function setConnBadge(ok){
+    const el = $('conn');
+    el.className = 'badge ' + (ok ? 'ok' : 'info');
+    el.textContent = ok ? 'Live (SSE)' : 'Connecting…';
+  }
+
+  function setError(msg){
+    $('err').textContent = msg ? String(msg) : '';
+  }
+
+  function render(payload){
+    if (!payload) return;
+    $('lastRun').textContent = payload.lastRunAt || '—';
+    $('forward').textContent = payload.forward ? 'Yes' : 'No';
+    $('horizon').textContent = (payload.horizonHours!=null ? payload.horizonHours : '—') + 'h';
+    $('thresh').textContent = (payload.threshold!=null ? (Number(payload.threshold)*100).toFixed(0)+'%' : '—');
+
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    $('count').textContent = String(items.length);
+
+    const tbody = $('tbody');
+    if (!items.length){
+      tbody.innerHTML = '<tr><td colspan="6">'
+        + esc(payload.error ? payload.error : 'No items yet…') + '</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = items.map(it=>{
+      const frost = String(it.decision||'').toUpperCase() === 'HEAT_ON';
+      const badge = frost
+        ? '<span class="badge warn">FROST</span>'
+        : '<span class="badge ok">No frost</span>';
+      const score = (it.score==null) ? '' : pct(it.score);
+      return '<tr>'
+        + '<td>'+esc(it.sensorName||'unknown')+'</td>'
+        + '<td>'+esc(it.time||'')+'</td>'
+        + '<td>'+esc(score)+'</td>'
+        + '<td>'+badge+'</td>'
+        + '<td><code>'+esc(it.decision||'')+'</code></td>'
+        + '<td>'+esc(it.reason||'')+'</td>'
+        + '</tr>';
+    }).join('');
+  }
+
+  // Try SSE first (best UX)
+  let es = null;
+  function connectSSE(){
+    try{
+      es = new EventSource(STA_BASE + '/events');
+      es.addEventListener('open', ()=>{ state.connected = true; setConnBadge(true); setError(''); });
+      es.addEventListener('snapshot', ev=> { try { render(JSON.parse(ev.data)); } catch{} });
+      es.addEventListener('update',   ev=> { try { render(JSON.parse(ev.data)); } catch{} });
+      es.onerror = ()=>{ state.connected = false; setConnBadge(false); /* browser retries automatically */ };
+    }catch(_){
+      // If EventSource fails to construct, leave to polling.
+      state.connected = false; setConnBadge(false);
+    }
+  }
+
+  // Fallback: poll /status every 30s; also used for manual refresh
+  async function fetchStatusOnce(){
+    try{
+      const r = await fetch(STA_BASE + '/status', { cache: 'no-store' });
+      const text = await r.text();
+      if (!r.ok) throw new Error('HTTP '+r.status+': '+text);
+      const j = JSON.parse(text);
+      render(j);
+      setError('');
+    }catch(e){
+      setError('Failed to fetch status: ' + (e?.message || e));
+    }
+  }
+
+  $('refresh').addEventListener('click', fetchStatusOnce);
+
+  // Boot: connect SSE, also fetch a baseline snapshot quickly.
+  connectSSE();
+  fetchStatusOnce();
+
+  // If SSE never connects, keep polling every 30s
+  setInterval(()=>{ if (!state.connected) fetchStatusOnce(); }, 30000);
+})();
+</script>
+</body>
+</html>

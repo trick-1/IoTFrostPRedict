@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Sensors – Time Series</title>
+<style>
+:root{color-scheme:light dark}
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,'Helvetica Neue',Arial,sans-serif;margin:2rem;line-height:1.45}
+h1{margin:0 0 .75rem}.muted{color:#666}
+.controls{display:flex;gap:.5rem;align-items:end;flex-wrap:wrap;margin:0 0 1rem}
+label{display:flex;flex-direction:column;font-size:.9rem}
+input{padding:.4rem .5rem;border:1px solid #d1d5db;border-radius:.375rem}
+button,a.button{padding:.45rem .8rem;border:1px solid #d1d5db;border-radius:.375rem;background:#f3f4f6;text-decoration:none;cursor:pointer}
+.chart{border:1px solid #e5e7eb;border-radius:.5rem;padding:.5rem;margin:.75rem 0}
+.legend{font:12px/1.4 ui-monospace,monospace;margin:.25rem 0 .5rem;color:#6b7280}
+#msg{min-height:1.2em}
+.small{font:12px/1.4 ui-monospace,monospace;color:#6b7280;margin:.2rem 0}
+.row{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}
+.note{font:12px/1.4 ui-monospace,monospace;color:#b45309;margin-left:.5rem}
+@media (prefers-color-scheme: dark){
+  input,button,a.button{border-color:#4b5563;background:#1f2937;color:#e5e7eb}
+  .chart{border-color:#374151}
+  .note{color:#f59e0b}
+}
+</style>
+</head>
+<body>
+<h1>Sensor time-series</h1>
+<p class="muted">One chart per metric (°C, % RH). Adjust the time range to filter.</p>
+
+<div class="controls">
+  <a class="button" href="/">← Back</a>
+  <label>From
+    <input id="from" type="datetime-local"/>
+  </label>
+  <label>To
+    <input id="to" type="datetime-local"/>
+  </label>
+  <button id="apply">Apply</button>
+  <div class="row">
+    <button id="last24-now">Last 24h (now)</button>
+    <button id="last24-latest">Last 24h (latest)</button>
+    <button id="last7d">Last 7 days</button>
+    <button id="last30d">Last 30 days</button>
+    <button id="nudgeMinus">−1h</button>
+    <button id="nudgePlus">+1h</button>
+    <span id="autoNote" class="note"></span>
+  </div>
+  <span id="msg"></span>
+</div>
+
+<div class="small" id="tzInfo"></div>
+<div class="small" id="queryPreview"></div>
+<div class="small" id="latestInfo"></div>
+
+<div class="chart">
+  <div class="legend">Temperature (°C)</div>
+  <canvas id="temp" width="900" height="320"></canvas>
+</div>
+
+<div class="chart">
+  <div class="legend">Humidity (%)</div>
+  <canvas id="hum" width="900" height="320"></canvas>
+</div>
+
+<script src="/lib/nodeplot.js"></script>
+<script>
+// ---------- datetime-local <-> UTC helpers ----------
+function setInputLocalFromUTC(inputEl, utcDate){
+  // Show local wall time for a given UTC instant
+  const d = new Date(utcDate.getTime() - utcDate.getTimezoneOffset()*60000);
+  inputEl.value = d.toISOString().slice(0,16); // 'YYYY-MM-DDTHH:mm'
+}
+function getUTCFromInputLocal(inputEl){
+  if (!inputEl.value) return null;
+  // Parse as local time, convert to UTC instant
+  const local = new Date(inputEl.value);
+  return new Date(local.getTime() + local.getTimezoneOffset()*60000);
+}
+function setRangeHoursAnchored(endUTC, hours){
+  const startUTC = new Date(endUTC.getTime() - hours*3600*1000);
+  setInputLocalFromUTC(document.getElementById('from'), startUTC);
+  setInputLocalFromUTC(document.getElementById('to'),   endUTC);
+}
+function setRangeHoursNow(hours){
+  setRangeHoursAnchored(new Date(), hours);
+}
+
+// ---------- UI helpers ----------
+const $ = (id)=>document.getElementById(id);
+const fmtNum = (v)=> (v==null || v==='NA' || !isFinite(v)) ? null : Number(v);
+
+function showTZ(){
+  try{
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local';
+    const offMin = -new Date().getTimezoneOffset();
+    const sign = offMin>=0?'+':'-';
+    const hh = String(Math.floor(Math.abs(offMin)/60)).padStart(2,'0');
+    const mm = String(Math.abs(offMin)%60).padStart(2,'0');
+    $('tzInfo').textContent = `Your browser time zone: ${tz} (UTC${sign}${hh}:${mm})`;
+  }catch{
+    $('tzInfo').textContent = '';
+  }
+}
+
+function previewQuery(fromUTC, toUTC){
+  const qs = new URLSearchParams();
+  if (fromUTC) qs.set('from', fromUTC.toISOString());
+  if (toUTC)   qs.set('to',   toUTC.toISOString());
+  const apiUrl = '/sensors/timeseries' + (qs.toString() ? ('?' + qs.toString()) : '');
+  $('queryPreview').textContent = `Query → ${apiUrl} (proxied via /series)`;
+}
+
+// ---------- Data helpers ----------
+async function fetchLatestTimestamp(){
+  // Inspect /data to find the newest reading timestamp (UTC ISO)
+  try{
+    const r = await fetch('/data', { cache:'no-store' });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const items = j.items || [];
+    let maxD = null;
+    for (const it of items){
+      const t = it.time || it.iso;
+      if (t){
+        const d = new Date(t);
+        if (!maxD || d > maxD) maxD = d;
+      }
+    }
+    return maxD ? maxD : null;
+  }catch{ return null; }
+}
+
+async function loadSeries({ autoFallback=false } = {}){
+  const statusEl = $('msg');
+  const noteEl = $('autoNote');
+  statusEl.textContent = 'Loading…';
+  noteEl.textContent = '';
+
+  const fromUTC = getUTCFromInputLocal($('from'));
+  const toUTC   = getUTCFromInputLocal($('to'));
+  previewQuery(fromUTC, toUTC);
+
+  const qs = new URLSearchParams();
+  if (fromUTC) qs.set('from', fromUTC.toISOString());
+  if (toUTC)   qs.set('to',   toUTC.toISOString());
+  const url = '/series' + (qs.toString() ? ('?' + qs.toString()) : '');
+
+  try{
+    const r = await fetch(url, { cache: 'no-store' });
+    const text = await r.text();
+    if (!r.ok) throw new Error(text || ('HTTP ' + r.status));
+    const { points=[] } = JSON.parse(text);
+
+    const tempSeries = new Map();
+    const humSeries  = new Map();
+
+    for (const p of points) {
+      const x = new Date(p.time);
+      if (p.temperature != null) {
+        const y = fmtNum(p.temperature);
+        if (y != null) {
+          if (!tempSeries.has(p.sensorName)) tempSeries.set(p.sensorName, []);
+          tempSeries.get(p.sensorName).push({ x, y });
+        }
+      }
+      if (p.humidity != null && p.humidity !== 'NA') {
+        const y = fmtNum(p.humidity);
+        if (y != null) {
+          if (!humSeries.has(p.sensorName)) humSeries.set(p.sensorName, []);
+          humSeries.get(p.sensorName).push({ x, y });
+        }
+      }
+    }
+
+    if (points.length === 0 && autoFallback) {
+      // No points—try anchoring to the latest known timestamp automatically
+      const latest = await fetchLatestTimestamp();
+      if (latest) {
+        setRangeHoursAnchored(latest, 24);
+        previewQuery(new Date(latest.getTime() - 24*3600e3), latest);
+        noteEl.textContent = `No data in last 24h up to now; showing last 24h ending at ${latest.toISOString()}.`;
+        return loadSeries({ autoFallback:false }); // prevent loops
+      }
+    }
+
+    // Sort and draw
+    for (const arr of tempSeries.values()) arr.sort((a,b)=>a.x-b.x);
+    for (const arr of humSeries.values())  arr.sort((a,b)=>a.x-b.x);
+
+    nodeplot.clear($('temp'));
+    nodeplot.clear($('hum'));
+    nodeplot.lineChart($('temp'), tempSeries, { yLabel:'°C' });
+    nodeplot.lineChart($('hum'),  humSeries,  { yLabel:'% RH' });
+
+    const nTemp = [...tempSeries.values()].reduce((s,a)=>s+a.length,0);
+    const nHum  = [...humSeries.values()].reduce((s,a)=>s+a.length,0);
+    const nTot  = (points||[]).length;
+    statusEl.textContent = `Loaded ${nTot} points (${nTemp} temp, ${nHum} humidity).`;
+    if (nTot === 0) statusEl.textContent += ' (No points in range.)';
+  }catch(e){
+    console.error(e);
+    statusEl.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function updateLatestInfo(){
+  const maxD = await fetchLatestTimestamp();
+  $('latestInfo').textContent = maxD
+    ? `Latest data timestamp: ${maxD.toISOString()} (UTC)`
+    : `Latest data timestamp: (none)`;
+}
+
+// ---------- Preset buttons ----------
+$('apply').addEventListener('click', ()=>loadSeries());
+
+$('last24-now').addEventListener('click', ()=>{
+  setRangeHoursNow(24);
+  // If window has no points, auto-fallback to last-24h ending at latest
+  loadSeries({ autoFallback:true });
+});
+
+$('last24-latest').addEventListener('click', async ()=>{
+  const maxD = await fetchLatestTimestamp();
+  if (maxD){
+    setRangeHoursAnchored(maxD, 24);
+    loadSeries();
+  } else {
+    setRangeHoursNow(24);
+    loadSeries();
+  }
+});
+
+$('last7d').addEventListener('click', ()=>{
+  setRangeHoursNow(24*7); loadSeries();
+});
+
+$('last30d').addEventListener('click', ()=>{
+  setRangeHoursNow(24*30); loadSeries();
+});
+
+// Nudge the current window by ±1h to test boundary effects easily
+$('nudgeMinus').addEventListener('click', ()=>{
+  const fromUTC = getUTCFromInputLocal($('from'));
+  const toUTC   = getUTCFromInputLocal($('to'));
+  if (!fromUTC || !toUTC) return;
+  setInputLocalFromUTC($('from'), new Date(fromUTC.getTime() - 3600e3));
+  setInputLocalFromUTC($('to'),   new Date(toUTC.getTime()   - 3600e3));
+  loadSeries();
+});
+$('nudgePlus').addEventListener('click', ()=>{
+  const fromUTC = getUTCFromInputLocal($('from'));
+  const toUTC   = getUTCFromInputLocal($('to'));
+  if (!fromUTC || !toUTC) return;
+  setInputLocalFromUTC($('from'), new Date(fromUTC.getTime() + 3600e3));
+  setInputLocalFromUTC($('to'),   new Date(toUTC.getTime()   + 3600e3));
+  loadSeries();
+});
+
+// ---------- Boot ----------
+showTZ();
+// Default to last 30 days so historical data shows immediately
+setRangeHoursNow(24*30);
+updateLatestInfo();
+loadSeries();
+</script>
+</body></html>

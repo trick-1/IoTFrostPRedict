@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Sensors – Latest Readings</title>
+<style>
+:root{color-scheme:light dark}
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,'Helvetica Neue',Arial,sans-serif;margin:2rem;line-height:1.45}
+h1{margin:0 0 .75rem}.muted{color:#666}
+table{border-collapse:collapse;width:100%;margin-top:1rem}
+th,td{border:1px solid #e5e7eb;padding:.5rem;text-align:left} th{background:#f9fafb}
+#msg{margin:.5rem 0 0;color:#b91c1c}
+#debug{margin-top:.5rem;font:12px/1.4 ui-monospace,monospace;color:#6b7280;white-space:pre-wrap}
+@media (prefers-color-scheme: dark){ th,td{border-color:#374151} th{background:#111827} }
+button{padding:.45rem .8rem;border:1px solid #d1d5db;border-radius:.375rem;background:#f3f4f6;cursor:pointer}
+@media (prefers-color-scheme: dark){ button{border-color:#4b5563;background:#1f2937;color:#e5e7eb} }
+a.button{display:inline-block;margin-right:.5rem;padding:.45rem .8rem;border:1px solid #d1d5db;border-radius:.375rem;text-decoration:none}
+</style>
+</head>
+<body>
+<h1>Latest sensor readings</h1>
+<p class="muted">Only LSN50v2-S31 (TempC_SHT) and LSN50-V2 (TempC1) are shown.</p>
+
+<div>
+  <a class="button" href="/">← Back</a>
+  <button id="refresh">Refresh now</button>
+  <span id="msg"></span>
+</div>
+
+<table id="t">
+  <thead><tr>
+    <th>Device</th><th>Profile</th><th>Time</th><th>Temperature (°C)</th><th>Humidity (%)</th>
+  </tr></thead>
+  <tbody><tr><td colspan="5">Loading…</td></tr></tbody>
+</table>
+
+<pre id="debug"></pre>
+
+<script>
+const $ = (id)=>document.getElementById(id);
+function fmt(v){ if (v === null || v === undefined) return ''; if (v === 'NA') return 'NA'; if (typeof v === 'number') return Number.isFinite(v)? v.toFixed(1) : String(v); return String(v); }
+async function loadOnce(){
+  const tb = document.querySelector('#t tbody');
+  const msg = $('msg');
+  const dbg = $('debug');
+  msg.textContent = 'Loading…';
+  const url = '/data';
+  dbg.textContent = 'GET ' + url;
+
+  try{
+    const r = await fetch(url, { cache: 'no-store' });
+    const text = await r.clone().text().catch(()=> '');
+    if (r.status === 401) { msg.textContent = 'Authentication failed (reload page).'; tb.innerHTML='<tr><td colspan="5">Auth failed</td></tr>'; return; }
+    if (!r.ok) { msg.textContent = 'Error ' + r.status + (text ? (' ' + text) : ''); return; }
+
+    msg.textContent = '';
+    const j = JSON.parse(text);
+
+    tb.innerHTML = '';
+    (j.items || []).forEach(it=>{
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td>'+ (it.deviceName ?? '') +'</td>'+
+        '<td>'+ (it.deviceProfileName ?? '') +'</td>'+
+        '<td>'+ (it.time ?? '') +'</td>'+
+        '<td>'+ fmt(it.temperature) +'</td>'+
+        '<td>'+ fmt(it.humidity) +'</td>';
+      tb.appendChild(tr);
+    });
+    if (!(j.items || []).length) tb.innerHTML = '<tr><td colspan="5">No matching devices</td></tr>';
+  }catch(e){
+    msg.textContent = 'JS error: ' + (e && e.message ? e.message : e);
+    console.error(e);
+  }
+}
+$('refresh').addEventListener('click', loadOnce);
+loadOnce();
+setInterval(loadOnce, 30000);
+</script>
+</body></html>

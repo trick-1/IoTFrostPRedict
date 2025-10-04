@@ -1,0 +1,19 @@
+ONNX_MODEL=./frost_lgbm.onnx          # your ONNX file
+API_BASE=http://YOURAPISERVER:3000
+API_KEY=YOURAPIKEY
+
+SENSOR_FIELD=sensorId
+TIME_FIELD=time
+PORT=8060
+
+MODEL_FEATURES=temperature,humidity
+
+# optional z-score scaling (one value per feature)
+# FEATURE_MEAN=0,0
+# FEATURE_STD=1,1
+
+# If your model expects sequences [batch,time,features], set:
+INPUT_KIND=sequence               # "single" | "sequence"
+SEQ_LEN=24
+SEQ_STRIDE=1
+TAKE_LATEST_PER_SENSOR=false     # single-step only

@@ -1,0 +1,12 @@
+# docker-compose.yml
+version: "3.8"
+
+services:
+  staserver:
+    image: staserver          # image to run
+    container_name: staserver # optional – keeps the same name as in `docker run`
+    environment:
+      - PREDICT_URL=http://172.31.42.242:8060/predict
+    ports:
+      - "3010:3010"           # host:container
+    restart: unless-stopped   # optional – keeps container running after a crash

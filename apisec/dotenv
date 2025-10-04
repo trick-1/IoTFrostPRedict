@@ -1,0 +1,36 @@
+# HTTP
+PORT=3000
+PROTECT_HEALTH=false
+
+# MongoDB
+MONGODB_URI=mongodb+srv://YOURUSERNAME:YOURCLUSTER.mongodb.net/?retryWrites=true&w=majority' 
+DB_NAME=iot
+COLLECTION_NAME=sensordata
+
+# Auth (choose one approach)
+# 1) Plaintext key(s) (comma-separated)
+API_KEYS=YOURAPIKEY
+
+# 2) Hashed key(s): SHA-256 hex digests (comma-separated)
+# API_KEY_HASHES=ab12cd34... (output of: node genkey.js hash <your-key>)
+# TLS / HTTPS
+HTTPS_ENABLE=false
+HTTPS_PORT=3443
+HTTP_REDIRECT_HTTPS=false
+
+# Provide key/cert as file paths...
+ HTTPS_KEY_PATH=./certs/server.key
+ HTTPS_CERT_PATH=./certs/server.crt
+# HTTPS_CA_PATH=./certs/ca.crt
+
+# ...or as base64 (useful in containers/secrets managers)
+# HTTPS_KEY_B64=
+# HTTPS_CERT_B64=
+# HTTPS_CA_B64=
+
+# If your private key is encrypted
+# HTTPS_PASSPHRASE=changeme
+#
+# Disable self signed cert checkign
+NODE_TLS_REJECT_UNAUTHORIZED=0
+
